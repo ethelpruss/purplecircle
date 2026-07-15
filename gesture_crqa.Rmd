@@ -1,0 +1,376 @@
+---
+title: "Categorical Cross-Recurrence of Gesture Classes (Guesser vs. Clue-Giver)"
+author: ""
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Notes
+
+- This is **cross-RQA**: recurrence = the two participants showing the *same* gesture
+  class at (possibly different) time points. To instead run **auto-RQA** on a single
+  participant (when that person repeats their own gesture class), pass the same series
+  to both `ts1` and `ts2` (e.g. `ts1 = ts_guesser, ts2 = ts_guesser`) and set `tw = 1`
+  to exclude the main diagonal.
+
+
+```{r setup, include=FALSE}
+# Global chunk options. echo = TRUE so the code is visible in the knitted output.
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. Load packages
+
+```{r packages}
+# readr / dplyr for fast, clean data wrangling; crqa for (categorical) RQA.
+# Install once if needed:
+#   install.packages(c("readr", "dplyr", "crqa"))
+library(readr)
+library(dplyr)
+library(crqa)
+```
+
+## 2. Point to the two files
+
+```{r paths}
+# File1 = guesser, File2 = clue-giver. These are hard paths, they point to where they live on my machine lcoally. You need to copy the file path to the files on your computer and replace these. 
+
+file_guesser   <- "/Users/tmullins/Documents/GitHub/TilburgMultiscaleSummerschool2026/Datasets/BalanceCorpus/gestureclassifications/preparation_103_203_5_guesser_cam02.mp4_predictions.csv"
+
+file_clueGiver <- "/Users/tmullins/Documents/GitHub/TilburgMultiscaleSummerschool2026/Datasets/BalanceCorpus/gestureclassifications/preparation_103_203_5_clueGiver_cam02.mp4_predictions.csv"
+```
+
+## 3. Read in both files
+
+```{r read}
+# Read the full CSVs. We only need two columns from each, selected in the next step.
+guesser_raw   <- read_csv(file_guesser)
+clueGiver_raw <- read_csv(file_clueGiver)
+
+# Quick sanity check on the columns available in each file.
+names(guesser_raw)
+names(clueGiver_raw)
+```
+
+## 4. Keep only `time` and `cnn_class`, and rename per participant
+
+```{r select}
+# Keep the two columns of interest and give cnn_class a participant-specific name
+# so the two series don't collide when we merge.
+
+guesser <- guesser_raw %>%
+  select(time, cnn_class) %>%
+  rename(cnn_class_guesser = cnn_class)
+
+clueGiver <- clueGiver_raw %>%
+  select(time, cnn_class) %>%
+  rename(cnn_class_clueGiver = cnn_class)
+```
+
+## 5. Merge on matched time
+
+```{r merge}
+# Inner join keeps only rows where both participants share the same `time`,
+# so every row is a matched time point with one cnn_class column per participant.
+
+merged <- inner_join(guesser, clueGiver, by = "time") %>%
+  arrange(time)
+
+# If the two files were sampled at the same frame rate, times should line up
+# exactly. If tiny floating-point differences drop rows, round first, e.g.:
+#   mutate(time = round(time, 3)) on both frames before joining.
+
+# Report how many time points were matched.
+cat("Matched time points:", nrow(merged), "\n")
+head(merged)
+```
+
+## 6. Encode the categorical classes as integers (shared coding scheme)
+
+```{r encode}
+# crqa needs numeric input. Build ONE factor level set from the union of classes
+# across both participants so an identical class maps to the same integer code in
+# both series (essential for cross-recurrence to be meaningful).
+
+all_levels <- union(merged$cnn_class_guesser, merged$cnn_class_clueGiver)
+
+merged <- merged %>%
+  mutate(
+    code_guesser   = as.integer(factor(cnn_class_guesser,   levels = all_levels)),
+    code_clueGiver = as.integer(factor(cnn_class_clueGiver, levels = all_levels))
+  )
+
+# The two numeric series that go into cRQA.
+ts_guesser   <- merged$code_guesser
+ts_clueGiver <- merged$code_clueGiver
+
+# Mapping of integer code -> class label, for reference.
+data.frame(code = seq_along(all_levels), cnn_class = all_levels)
+```
+
+## 7. Run categorical cross-RQA
+
+```{r crqa}
+# Categorical RQA settings:
+#   delay = 1, embed = 1  -> no time-delay embedding (correct for nominal data)
+#   rescale = 0, normalize = 0 -> do not rescale because we use integer codes
+#   radius = 0.0001 -> only exact code matches count as recurrences (1 is different from 2)
+#                      (distinct integer codes differ by >= 1)
+#   tw = 0 -> Theiler window off; keep the diagonal (meaningful in cross-recurrence)
+#   datatype = "categorical"
+
+res <- crqa(
+  ts1        = ts_guesser,
+  ts2        = ts_clueGiver,
+  delay      = 1,
+  embed      = 1,
+  rescale    = 0,
+  radius     = 0.0001,
+  normalize  = 0,
+  mindiagline = 2,
+  minvertline = 2,
+  tw         = 0,
+  whiteline  = FALSE,
+  recpt      = FALSE,
+  side       = "both",
+  method     = "crqa",
+  metric     = "euclidean",
+  datatype   = "categorical"
+)
+
+# RQA measures: RR (recurrence rate), DET (determinism), maxL/L, ENTR, LAM, TT, etc.
+res[!names(res) %in% "RP"]
+```
+
+## 8. Plot the recurrence plot (RP)
+
+```{r}
+library(ggplot2)
+library(reshape2)
+
+create_cross_rp_plot <- function(rp, graph_title,
+                                 xlab = "Guesser (time point)",
+                                 ylab = "Clue-giver (time point)") {
+  # Convert RP matrix to long format
+  rqpa.data <- reshape2::melt(as.matrix(rp))
+  
+  # Filter for recurrence points
+  rqpa.data <- rqpa.data[rqpa.data$value == TRUE | rqpa.data$value == 1, ]
+  
+  ggplot(data = rqpa.data, aes(x = Var1, y = Var2)) +
+    geom_point(size = 0.5, color = 'black') +   # Small black points for recurrences
+    labs(x = xlab, y = ylab, title = graph_title) +
+    theme_minimal() +
+    theme(axis.text.x  = element_text(size = 9, angle = 0, vjust = 0.3),
+          axis.text.y  = element_text(size = 9),
+          axis.text    = element_text(size = 16),
+          axis.title   = element_text(size = 16),
+          plot.title   = element_text(size = 16, hjust = 0.5),
+          aspect.ratio = 1,
+          panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6)) +
+    coord_fixed()
+}
+
+p <- create_cross_rp_plot(res$RP, "Gesture Class Cross-Recurrence\nPreparation 103_203_5")
+print(p)
+
+# Optional: save
+# ggsave("CrossRP_103_203_5.png", plot = p, width = 6, height = 6, dpi = 300)
+```
+---
+
+```{r}
+# --- mdRQA: dyad as ONE system -------------------------------------------
+# Unlike the cross-RQA above (which only fires when the two people share a class),
+# mdRQA treats (guesser, clueGiver) as a single 2-D state. State 12 at time i
+# recurring as 12 at time j counts, even though they're doing different things.
+# So all joint configurations -- 11, 12, 21, 22, ... -- are states in their own right.
+
+## Encoding A: integer codes -> EXACT joint-state recurrence
+md_int <- as.matrix(merged[, c("code_guesser", "code_clueGiver")])
+
+## Encoding B: one-hot -> GRADED similarity (see radius note below)
+onehot <- function(x, levs) {
+  m <- matrix(0L, nrow = length(x), ncol = length(levs))
+  m[cbind(seq_along(x), match(x, levs))] <- 1L
+  m
+}
+md_oh <- cbind(
+  onehot(merged$cnn_class_guesser,   all_levels),
+  onehot(merged$cnn_class_clueGiver, all_levels)
+)
+
+# Under one-hot + Euclidean, joint-state distances are discrete and interpretable:
+#   both participants match  -> 0
+#   exactly one mismatches   -> sqrt(2) ~= 1.414   <- "similar" state
+#   both mismatch            -> 2
+# So:
+#   radius = 0.0001 -> exact joint state only (equivalent to Encoding A)
+#   radius = 1.5    -> exact PLUS "one of the two matches"  <- what you want
+radius_similar <- 1.5
+
+# tw = 1: this is AUTO-recurrence of one system, so exclude the line of identity
+res_md <- crqa(
+  ts1         = md_oh,
+  ts2         = md_oh,
+  delay       = 1,      # no embedding: the dimensions ARE the system
+  embed       = 1,
+  rescale     = 0,
+  radius      = radius_similar,
+  normalize   = 0,
+  mindiagline = 2,
+  minvertline = 2,
+  tw          = 1,
+  whiteline   = FALSE,
+  recpt       = FALSE,
+  side        = "both",
+  method      = "mdcrqa",
+  metric      = "euclidean"
+)
+
+res_md[!names(res_md) %in% "RP"]
+
+# Reuse the plot function from the previous chunk
+p_md <- create_cross_rp_plot(
+  res_md$RP,
+  "Dyadic mdRQA: revisited joint gesture states",
+  xlab = "Time point",
+  ylab = "Time point"
+)
+print(p_md)
+
+```
+
+```{r}
+# How often does each joint state occur? Sanity-check before trusting RR/DET.
+merged %>%
+  count(cnn_class_guesser, cnn_class_clueGiver, sort = TRUE) %>%
+  mutate(prop = round(n / sum(n), 3))
+
+# Radius sweep: RR should jump at 0, sqrt(2), and 2 -- nowhere else.
+sapply(c(0.0001, 1.5, 2.5), function(r) {
+  crqa(md_oh, md_oh, delay = 1, embed = 1, rescale = 0, radius = r,
+       normalize = 0, mindiagline = 2, minvertline = 2, tw = 1,
+       method = "mdcrqa", metric = "euclidean")$RR
+})
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+
+# Label each time point with its joint state, e.g. "point|beat"
+merged <- merged %>%
+  mutate(joint_state = paste(cnn_class_guesser, cnn_class_clueGiver, sep = "|"))
+
+state_lookup <- merged %>%
+  mutate(ID = row_number()) %>%
+  select(ID, joint_state, cnn_class_guesser, cnn_class_clueGiver)
+
+# Melt the RP and keep only recurrent points
+rp_long <- reshape2::melt(as.matrix(res_md$RP))
+rp_long <- rp_long[rp_long$value == TRUE | rp_long$value == 1, ]
+
+# Attach the state at BOTH ends of each recurrence
+rp_long <- rp_long %>%
+  left_join(state_lookup, by = c("Var1" = "ID")) %>%
+  rename(state_i = joint_state, g_i = cnn_class_guesser, c_i = cnn_class_clueGiver) %>%
+  left_join(state_lookup, by = c("Var2" = "ID")) %>%
+  rename(state_j = joint_state, g_j = cnn_class_guesser, c_j = cnn_class_clueGiver) %>%
+  mutate(
+    # Because radius = 1.5, a recurrence is either an exact joint-state revisit
+    # or a partial one (exactly one participant matches).
+    match_type = case_when(
+      state_i == state_j                 ~ "Exact joint state",
+      g_i == g_j & c_i != c_j            ~ "Guesser matches only",
+      c_i == c_j & g_i != g_j            ~ "Clue-giver matches only",
+      TRUE                               ~ "Other"
+    )
+  )
+
+# --- Option 1: colour by match type (unambiguous under radius = 1.5) -------
+p_md_type <- ggplot(rp_long, aes(x = Var1, y = Var2, fill = match_type)) +
+  geom_raster() +
+  scale_fill_manual(values = c(
+    "Exact joint state"       = "#000000",
+    "Guesser matches only"    = "#D55E00",
+    "Clue-giver matches only" = "#0072B2",
+    "Other"                   = "grey80"
+  )) +
+  labs(x = "Time point", y = "Time point",
+       title = "Dyadic mdRQA: revisited joint states",
+       fill = "Recurrence type") +
+  theme_minimal() +
+  theme(axis.text.x  = element_text(size = 9, angle = 0, vjust = 0.3),
+        axis.text.y  = element_text(size = 9),
+        axis.title   = element_text(size = 16),
+        plot.title   = element_text(size = 16, hjust = 0.5),
+        legend.title = element_text(size = 10),
+        aspect.ratio = 1,
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6)) +
+  coord_fixed()
+
+print(p_md_type)
+
+# --- Option 2: colour by the joint state itself ---------------------------
+# Only exact recurrences get a state colour; partial ones stay grey, since
+# their two endpoints disagree and no single state colour would be honest.
+p_md_state <- rp_long %>%
+  mutate(state_col = ifelse(state_i == state_j, state_i, NA)) %>%
+  ggplot(aes(x = Var1, y = Var2, fill = state_col)) +
+  geom_raster() +
+  scale_fill_discrete(na.value = "grey85") +
+  labs(x = "Time point", y = "Time point",
+       title = "Dyadic mdRQA: exact joint-state revisits",
+       fill = "Joint state\n(guesser|clue-giver)") +
+  theme_minimal() +
+  theme(axis.title   = element_text(size = 16),
+        plot.title   = element_text(size = 16, hjust = 0.5),
+        legend.title = element_text(size = 10),
+        legend.text  = element_text(size = 8),
+        aspect.ratio = 1,
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6)) +
+  coord_fixed()
+
+print(p_md_state)
+```
+
+```{r}
+library(dplyr)
+
+# Option 2 greys a cell whenever state_i != state_j (that's the ifelse -> NA).
+# So: every recurrent pair that is NOT an exact joint-state revisit.
+grey_cells <- rp_long %>%
+  filter(state_i != state_j)
+
+cat("Recurrent cells total:", nrow(rp_long), "\n")
+cat("Grey (non-exact) cells:", nrow(grey_cells),
+    sprintf("(%.1f%%)\n", 100 * nrow(grey_cells) / nrow(rp_long)))
+
+# --- Which state PAIRS are being greyed, and how often ---------------------
+# Unordered: (A,B) and (B,A) are the same pairing, so collapse them.
+grey_pairs <- grey_cells %>%
+  mutate(
+    s1 = pmin(state_i, state_j),
+    s2 = pmax(state_i, state_j)
+  ) %>%
+  count(s1, s2, match_type, sort = TRUE) %>%
+  mutate(prop_of_grey = round(n / sum(n), 3))
+
+grey_pairs
+
+# --- Same thing, but broken out so you can see WHO matched -----------------
+grey_detail <- grey_cells %>%
+  count(state_i, state_j, match_type, sort = TRUE) %>%
+  mutate(prop = round(n / sum(n), 3))
+
+head(grey_detail, 20)
+
+# --- Sanity check: does the split match the plot? --------------------------
+# Exact = coloured in Option 2; everything else = grey.
+rp_long %>%
+  mutate(coloured = ifelse(state_i == state_j, "Coloured (exact)", "Grey (partial)")) %>%
+  count(coloured) %>%
+  mutate(prop = round(n / sum(n), 3))
+```
