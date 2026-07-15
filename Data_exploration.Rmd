@@ -1,0 +1,294 @@
+---
+title: "Data exploration"
+author: "Ethel Pruss"
+date: "2026-07-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(purrr)
+library(dplyr)
+library(ggplot2)
+```
+
+## Import OpenFace data (cam01 only) and aggregate into df
+
+```{r import-openface}
+base_dir <- "BalanceCorpus/OpenFace/OF_output"
+
+# cam01 only, drop "preparation" folders
+folders <- list.dirs(base_dir, full.names = TRUE, recursive = FALSE)
+folders <- folders[str_detect(basename(folders), "_cam01$")]
+folders <- folders[!str_detect(basename(folders), "^preparation")]
+
+# folder name looks like: 103_203_12_1_20250113_152455_doughnut_board_clueGiver_cam01
+# dyad = first two ids, session_datetime = date_time block, word = everything between
+# session_datetime and role, role = clueGiver/guesser, cam = camXX
+# (named session_datetime, not "timestamp", so it doesn't clobber OpenFace's own
+# per-frame `timestamp` column, which is real elapsed seconds within the recording)
+pattern <- "^(\\d+_\\d+)_.*?(\\d{8}_\\d{6})_(.+)_(clueGiver|guesser)_(cam\\d+)$"
+
+df <- map_dfr(folders, function(folder) {
+  fname <- basename(folder)
+  csv_path <- file.path(folder, paste0(fname, ".csv"))
+
+  if (!file.exists(csv_path)) {
+    warning("Missing csv for: ", fname)
+    return(NULL)
+  }
+
+  m <- str_match(fname, pattern)
+  if (any(is.na(m))) {
+    warning("Folder name didn't match expected pattern: ", fname)
+    return(NULL)
+  }
+
+  data <- read.csv(csv_path, stringsAsFactors = FALSE, strip.white = TRUE)
+
+  data$dyad             <- m[2]
+  data$session_datetime <- m[3]
+  data$word             <- m[4]
+  data$role             <- m[5]
+  data$cam              <- m[6]
+  # condition = "board" or "ground", read off the end of the word label
+  data$condition        <- str_extract(m[4], "(board|ground)$")
+
+  data
+})
+
+table(df$dyad, df$role)
+```
+
+```{r}
+write.csv(df,"OF_df.csv")
+```
+
+----
+
+## Load df
+
+```{r}
+df <- read.csv("OF_df.csv")
+```
+
+## Get deltas
+
+```{r gaze-angle-deltas}
+# delta = change from previous frame, within each recording (dyad + session_datetime + role)
+# AU04 = brow lowerer (frown/tension), AU07 = lid tightener (squint)
+# _r = intensity (0-5 continuous), _c = presence (0/1 binary)
+df <- df %>%
+  arrange(dyad, session_datetime, role, frame) %>%
+  group_by(dyad, session_datetime, role) %>%
+  mutate(
+    delta_gaze_angle_x = gaze_angle_x - lag(gaze_angle_x),
+    delta_gaze_angle_y = gaze_angle_y - lag(gaze_angle_y),
+    delta_brow_r        = AU04_r - lag(AU04_r),
+    delta_brow_c        = AU04_c - lag(AU04_c),
+    delta_squint_r      = AU07_r - lag(AU07_r),
+    delta_squint_c      = AU07_c - lag(AU07_c)
+  ) %>%
+  ungroup()
+```
+
+## Expressivity delta (mean of all AU_r deltas)
+
+```{r expressivity-delta}
+# every AU intensity column (AU01_r, AU02_r, ... AU45_r)
+au_r_cols <- grep("^AU[0-9]+_r$", names(df), value = TRUE)
+
+df <- df %>%
+  arrange(dyad, session_datetime, role, frame) %>%
+  group_by(dyad, session_datetime, role) %>%
+  mutate(
+    delta_expressivity = {
+      au_deltas <- across(all_of(au_r_cols), ~ . - lag(.))
+      rowMeans(au_deltas, na.rm = TRUE)
+    }
+  ) %>%
+  ungroup()
+```
+
+## Split by condition and export (gaze angle + delta only, pre-smoothing)
+
+```{r export-by-condition}
+gaze_cols <- c("dyad", "session_datetime", "word", "condition", "role", "cam", "frame", "timestamp",
+               "gaze_angle_x", "gaze_angle_y", "delta_gaze_angle_x", "delta_gaze_angle_y")
+
+df_board  <- df %>% filter(condition == "board")  %>% select(all_of(gaze_cols))
+df_ground <- df %>% filter(condition == "ground") %>% select(all_of(gaze_cols))
+
+write.csv(df_board,  "gaze_angle_board.csv",  row.names = FALSE)
+write.csv(df_ground, "gaze_angle_ground.csv", row.names = FALSE)
+```
+
+```{r}
+write.csv(df,"OF_df.csv")
+```
+
+
+## Smooth deltas before downsampling
+
+```{r smooth-deltas}
+# raw frame-to-frame deltas are noisy; apply a centered moving-average
+# smoother (15 frames ~ 0.5s at 30fps) within each recording before binning
+# increase/decrease k for more/less smoothing (k is in frames, ~30 frames/sec)
+smooth_ma <- function(x, k = 15) as.numeric(stats::filter(x, rep(1 / k, k), sides = 2))
+
+df <- df %>%
+  arrange(dyad, session_datetime, role, frame) %>%
+  group_by(dyad, session_datetime, role) %>%
+  mutate(
+    delta_gaze_angle_x_smooth = smooth_ma(delta_gaze_angle_x),
+    delta_gaze_angle_y_smooth = smooth_ma(delta_gaze_angle_y)
+  ) %>%
+  ungroup()
+```
+
+## Downsample to ~10 samples/sec
+
+```{r downsample-10hz}
+# raw data is ~30fps; bin into 0.1s windows using OpenFace's native per-frame
+# `timestamp` (real elapsed seconds within the recording) and average the
+# smoothed deltas within each bin, giving ~10 points/sec per line instead of ~30
+df_binned <- df %>%
+  mutate(time_bin = floor(timestamp * 10) / 10) %>%
+  group_by(dyad, word, condition, role, time_bin) %>%
+  summarise(
+    delta_gaze_angle_x = mean(delta_gaze_angle_x_smooth, na.rm = TRUE),
+    delta_gaze_angle_y = mean(delta_gaze_angle_y_smooth, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+## Plot deltas: guesser vs. clueGiver, one plot per dyad + word
+
+```{r plot-delta-per-word}
+plot_delta <- function(data, dyad_val, word_val, metric, ylab) {
+  sub <- dplyr::filter(data, dyad == dyad_val, word == word_val)
+  # breaks from the real data range (always starts at 0), not the padded panel limits
+  x_breaks <- seq(0, ceiling(max(sub$time_bin, na.rm = TRUE)), by = 1)
+  ggplot(sub, aes(x = time_bin, y = .data[[metric]], color = role)) +
+    geom_line() +
+    scale_x_continuous(breaks = x_breaks) +
+    labs(title = paste(dyad_val, "-", word_val), x = "Time (s)", y = ylab)
+}
+
+# subset: 1 "_board" word and 1 "_ground" word per dyad
+combos <- df_binned %>%
+  distinct(dyad, word, condition) %>%
+  group_by(dyad, condition) %>%
+  slice(1) %>%
+  ungroup()
+
+for (i in seq_len(nrow(combos))) {
+  d <- combos$dyad[i]
+  w <- combos$word[i]
+  print(plot_delta(df_binned, d, w, "delta_gaze_angle_x", "Δ gaze_angle_x"))
+  print(plot_delta(df_binned, d, w, "delta_gaze_angle_y", "Δ gaze_angle_y"))
+}
+```
+
+### WMS analysis
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(wms)
+library(remotes)
+```
+
+
+## Parameter description -  this is not code, it is text in markdown. Do not change.
+  x, y,                      # two numeric vectors of equal length
+  srate          = 100,      # sampling rate (Hz)
+  win            = 200,      # window size (samples); >= 100 recommended
+  minfreq        = 0.05,     # minimum frequency to resolve (Hz)
+  maxfreq        = 50,       # maximum frequency (Hz); <= Nyquist (srate / 2) (half of sampling rate)
+  mincycle       = 5,        # min Morlet wavelet cycles
+  maxcycle       = 8,        # max Morlet wavelet cycles
+  nfreqs         = 40,       # number of frequency bins
+  wavelet_length = 4         # wavelet duration (seconds)
+
+
+```{r wms-setup}
+# native frame rate (frames/sec) from OpenFace's per-frame `timestamp` column
+srate <- 30
+
+# for one dyad+word trial: pull clueGiver's and guesser's series for `metric`
+# (their two simultaneously-recorded cams), ordered by frame, and trim both
+# to the same length so they start and end together
+get_aligned_pair <- function(data, dyad_val, word_val, metric) {
+  trial <- data %>% filter(dyad == dyad_val, word == word_val)
+  cg <- trial %>% filter(role == "clueGiver") %>% arrange(frame) %>% pull(.data[[metric]])
+  gs <- trial %>% filter(role == "guesser")   %>% arrange(frame) %>% pull(.data[[metric]])
+  # drop each series' first frame: its delta is NA (nothing to diff against),
+  # and an NA anywhere breaks the wavelet transform in win_ms_synch/plot_wms
+  cg <- cg[-1]
+  gs <- gs[-1]
+  n  <- min(length(cg), length(gs))
+  list(clueGiver = cg[seq_len(n)], guesser = gs[seq_len(n)])
+}
+```
+
+```{r wms-sanity-check}
+# checks that the trial resolves to exactly one dyad/word/condition, that
+# both roles are present, and reports how far apart the two cams' start/end
+# timestamps are (should be ~0, since both start recording together)
+sanity_check_pair <- function(data, dyad_val, word_val) {
+  trial <- data %>% filter(dyad == dyad_val, word == word_val)
+
+  stopifnot(
+    "trial resolves to more than one dyad" = n_distinct(trial$dyad) == 1,
+    "trial resolves to more than one word" = n_distinct(trial$word) == 1,
+    "trial resolves to more than one condition" = n_distinct(trial$condition) == 1,
+    "both clueGiver and guesser must be present" = setequal(unique(trial$role), c("clueGiver", "guesser"))
+  )
+
+  cg <- trial %>% filter(role == "clueGiver") %>% arrange(frame)
+  gs <- trial %>% filter(role == "guesser")   %>% arrange(frame)
+
+  cat("dyad:", unique(trial$dyad), " word:", unique(trial$word), " condition:", unique(trial$condition), "\n")
+  cat("frames  - clueGiver:", nrow(cg), " guesser:", nrow(gs), "\n")
+  cat("start t - clueGiver:", cg$timestamp[1], "s  guesser:", gs$timestamp[1], "s",
+      " (diff:", abs(cg$timestamp[1] - gs$timestamp[1]), "s)\n")
+  cat("end t   - clueGiver:", tail(cg$timestamp, 1), "s  guesser:", tail(gs$timestamp, 1), "s",
+      " (diff:", abs(tail(cg$timestamp, 1) - tail(gs$timestamp, 1)), "s)\n")
+
+  invisible(list(clueGiver = cg, guesser = gs))
+}
+```
+
+```{r wms-run}
+# single trial: one word, one dyad
+trial_dyad <- "103_203"
+trial_word <- "pasta_ground"
+#doughnut_board
+#pasta_ground
+
+sanity_check_pair(df, trial_dyad, trial_word)
+
+pair_x <- get_aligned_pair(df, trial_dyad, trial_word, "delta_expressivity")
+pair_y <- get_aligned_pair(df, trial_dyad, trial_word, "delta_expressivity")
+
+wms_x <- win_ms_synch(pair_x$clueGiver, pair_x$guesser,
+                       srate = srate, win = 30, minfreq = 0.3, maxfreq = 8,
+                       mincycle = 4, maxcycle = 8, nfreqs = 32, wavelet_length = 3)
+wms_y <- win_ms_synch(pair_y$clueGiver, pair_y$guesser,
+                       srate = srate, win = 30, minfreq = 0.3, maxfreq = 8,
+                       mincycle =4, maxcycle = 8, nfreqs = 32, wavelet_length = 3)
+```
+
+```{r wms-plot}
+plot_wms(wms_x, title_str = paste(trial_dyad, trial_word, "- x"))
+plot_wms(wms_y, title_str = paste(trial_dyad, trial_word, "- y"))
+```
+
+
+Brow- action unit 4 - unstable or tense - 
+Squinting - action unit 7 - 
+expressiveness score - face movement total score - expressivity (by action unit deltas and then)
+
+
