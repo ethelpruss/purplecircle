@@ -1,0 +1,417 @@
+---
+title: "mdrqa_displacement"
+author: "TkaraMullins"
+date: "2026-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Load packages
+
+```{r packages}
+# readr / dplyr for fast, clean data wrangling; crqa for RQA.
+# Install once if needed:
+#   install.packages(c("readr", "dplyr", "crqa", "ggplot2"))
+library(readr)
+library(dplyr)
+library(crqa)
+library(ggplot2)
+```
+
+## 2. Point to the files
+
+```{r paths, include=FALSE}
+#guesser_body   <- read_csv("/Users/tmullins/Desktop/motiontest/103_203_20_1_20250113_152735_bitter_board_guesser_cam01_body_displacement.csv")
+#clueGiver_body <- read_csv("/Users/tmullins/Desktop/motiontest/103_203_20_1_20250113_152735_bitter_board_clueGiver_cam01_body_displacement.csv")
+#gaze_ground_all <- read_csv("/Users/tmullins/Downloads/gaze_angle_ground.csv")
+#gaze_board_all  <- read_csv("/Users/tmullins/Downloads/gaze_angle_board.csv")
+```
+
+```{r paths, include=FALSE}
+guesser_body   <- read_csv("/Users/tmullins/Desktop/motiontest/116_216_45_1_20250116_103813_gravy_board_guesser_cam01_body_displacement.csv")
+clueGiver_body <- read_csv("/Users/tmullins/Desktop/motiontest/116_216_45_1_20250116_103813_gravy_board_clueGiver_cam01_body_displacement.csv")
+#gaze_ground_all <- read_csv("/Users/tmullins/Downloads/gaze_angle_ground.csv")
+#gaze_board_all  <- read_csv("/Users/tmullins/Downloads/gaze_angle_board.csv")
+```
+
+```{r names, eval=FALSE}
+names(guesser_body)
+names(clueGiver_body)
+names(gaze_ground_all)
+names(gaze_board_all)
+```
+
+Convert body time from milliseconds to seconds so it's on the same unit as gaze.
+
+```{r body-time}
+clueGiver_body <- clueGiver_body %>%
+  mutate(time = round(time / 1000, 3))
+
+guesser_body <- guesser_body %>%
+  mutate(time = round(time / 1000, 3))
+```
+
+## 3. Filter for the proper trial
+
+Keep `role`, `timestamp`, `delta_gaze_angle_x` and `delta_gaze_angle_y` for mdRQA.
+Rename `timestamp` to `time` to match the displacement files.
+
+```{r select-gaze}
+TRIAL <- "bitter_board"   # single place to change the trial
+
+gaze_board_trial_clueGiver <- gaze_board_all %>%
+  filter(word == TRIAL, role == "clueGiver") %>%
+  select(role, timestamp, delta_gaze_angle_x, delta_gaze_angle_y) %>%
+  rename(time = timestamp)
+
+gaze_board_trial_guesser <- gaze_board_all %>%
+  filter(word == TRIAL, role == "guesser") %>%
+  select(role, timestamp, delta_gaze_angle_x, delta_gaze_angle_y) %>%
+  rename(time = timestamp)
+```
+
+## 4. Collapse gaze x and y into one stream per person
+
+```{r gaze-composite}
+gaze_board_trial_clueGiver <- gaze_board_trial_clueGiver %>%
+  mutate(clueGiver_gaze = sqrt(delta_gaze_angle_x^2 + delta_gaze_angle_y^2))
+
+gaze_board_trial_guesser <- gaze_board_trial_guesser %>%
+  mutate(guesser_gaze = sqrt(delta_gaze_angle_x^2 + delta_gaze_angle_y^2))
+```
+
+Drop `role` — it's redundant once it's in the column name, and it would collide as
+`role.x` / `role.y` in the joins below.
+
+```{r trim-gaze}
+gaze_board_trial_clueGiver <- gaze_board_trial_clueGiver %>%
+  select(time, clueGiver_gaze)
+
+gaze_board_trial_guesser <- gaze_board_trial_guesser %>%
+  select(time, guesser_gaze)
+```
+
+Same idea for body: rename the displacement column per person BEFORE joining,
+otherwise the merged frame gets `displacement.x` / `displacement.y` with no way to
+tell them apart.
+
+```{r trim-body}
+DISP_COL <- "displacement"   # <- edit to the real column name
+
+clueGiver_body_trim <- clueGiver_body %>%
+  select(time, clueGiver_body = all_of(DISP_COL))
+
+guesser_body_trim <- guesser_body %>%
+  select(time, guesser_body = all_of(DISP_COL))
+```
+
+## 5. Merge on matched time
+
+Inner join keeps only rows where both participants share the same `time`, so every
+row is a matched time point with one column per stream.
+
+```{r merge-gaze}
+merged <- inner_join(gaze_board_trial_guesser, gaze_board_trial_clueGiver, by = "time") %>%
+  arrange(time)
+
+cat("Gaze matched time points:", nrow(merged), "\n")
+```
+
+```{r merge-body}
+mdrqa_df <- merged %>%
+  inner_join(guesser_body_trim,   by = "time") %>%
+  inner_join(clueGiver_body_trim, by = "time") %>%
+  arrange(time) %>%
+  select(time, clueGiver_body, clueGiver_gaze, guesser_body, guesser_gaze)
+
+cat("Final matched time points:", nrow(mdrqa_df), "\n")
+head(mdrqa_df)
+```
+
+## 6. Build the multivariate matrix
+
+mdRQA treats the dyad as one system: each column is a dimension, each row a time
+point.
+
+`DIMS` is the one place that decides what goes into the state space. Your earlier
+version described four dimensions in prose but selected only the two body columns —
+this makes the choice explicit so the two can't drift apart again. Uncomment the
+four-column version if gaze belongs in the analysis.
+
+```{r md-matrix}
+DIMS <- c("clueGiver_body", "guesser_body")
+# DIMS <- c("clueGiver_body", "clueGiver_gaze", "guesser_body", "guesser_gaze")
+
+M <- mdrqa_df %>%
+  select(all_of(DIMS)) %>%
+  as.matrix()
+
+# Body displacement and gaze angle live on different scales and units, so z-score
+# each column. Without that, whichever stream has the larger variance dominates the
+# Euclidean distance and the others contribute almost nothing.
+M <- scale(M)
+
+FS <- 30        # sampling rate in Hz, from the 0.033 s spacing
+cat("Matrix:", nrow(M), "samples x", ncol(M), "dimensions (~",
+    round(nrow(M) / FS, 1), "s )\n")
+```
+
+## 7. Set parameters
+
+No embedding: the simultaneous streams are taken as the state space directly, so
+`embed = 1` and delay is inert.
+
+```{r params}
+DELAY <- 1
+EMBED <- 1
+
+run_md <- function(radius) {
+  crqa(M, M,
+       delay = DELAY, embed = EMBED, rescale = 1, radius = radius,
+       normalize = 0, mindiagline = 2, minvertline = 2, tw = 0,
+       whiteline = FALSE, recpt = FALSE, side = "both",
+       method = "mdcrqa", metric = "euclidean", datatype = "continuous")
+}
+```
+
+## 8. Sweep radius to hit a fixed RR
+
+RR is held constant so the line-based measures are comparable across trials. Radius
+is whatever it takes to get there, and gets reported as a nuisance parameter rather
+than interpreted.
+
+```{r radius-sweep}
+target_rr <- 5   # hold this identical for every trial
+
+rr_at <- function(r) tryCatch(run_md(r)$RR, error = function(e) NA_real_)
+
+# Coarse pass to bracket the target
+coarse <- seq(0.05, 3, by = 0.05)
+rrs_c  <- sapply(coarse, rr_at)
+
+plot(coarse, rrs_c, type = "b", xlab = "radius", ylab = "RR (%)")
+abline(h = target_rr, lty = 2)
+
+# Fine pass around the bracket
+i   <- which.min(abs(rrs_c - target_rr))
+lo  <- coarse[max(i - 1, 1)]
+hi  <- coarse[min(i + 1, length(coarse))]
+
+fine  <- seq(lo, hi, length.out = 60)
+rrs_f <- sapply(fine, rr_at)
+
+best   <- which.min(abs(rrs_f - target_rr))
+RADIUS <- fine[best]
+
+cat("radius =", round(RADIUS, 4), "-> RR =", round(rrs_f[best], 3), "%\n")
+```
+
+```{r trial-level}
+res <- run_md(RADIUS)
+
+mdrqa_out <- data.frame(
+  trial  = TRIAL,
+  n      = nrow(M),
+  radius = RADIUS,
+  RR     = res$RR,    # fixed at target — confirms the sweep landed
+  DET    = res$DET,
+  LAM    = res$LAM,
+  ENTR   = res$ENTR
+)
+
+print(mdrqa_out)
+```
+
+```{r recurrence-plot}
+rp_df <- as.data.frame(which(as.matrix(res$RP), arr.ind = TRUE))
+names(rp_df) <- c("x", "y")
+rp_df$x <- rp_df$x / FS
+rp_df$y <- rp_df$y / FS
+
+ggplot(rp_df, aes(x = x, y = y)) +
+  geom_point(shape = 15, size = 0.3, colour = "black") +
+  coord_fixed(xlim = c(0, nrow(M) / FS), ylim = c(0, nrow(M) / FS), expand = FALSE) +
+  labs(x = "Time (s)", y = "Time (s)", title = "mdRQA recurrence plot") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        panel.border = element_rect(fill = NA, colour = "grey70"))
+```
+
+## 9. Sliding-window mdRQA
+
+Windows are analysed at a *fixed RR*, not a fixed radius. With a fixed radius the
+recurrence density drifts from window to window and DET rides along with it, so
+"elevated DET" would really mean "elevated RR". Holding RR constant makes DET a
+statement about the *structure* of recurrence — how much of it falls on diagonal
+lines — rather than the amount.
+
+Because RR is just the proportion of pairwise distances at or below the radius, the
+radius that yields `TARGET_RR` is the `TARGET_RR`-th percentile of that window's own
+distance matrix. That's exact and costs one `crqa` call per window instead of a
+sweep.
+
+One bookkeeping note: these windows use `rescale = 0` and a raw-distance radius,
+while section 8 uses `rescale = 1` (radius in units of mean distance). The two
+`radius` numbers therefore aren't on the same scale and shouldn't be compared to
+each other. RR — the thing actually held fixed — is comparable throughout.
+
+```{r}
+WIN_SEC   <- 2      # window length
+STEP_SEC  <- 1   # hop — keep it below the window
+TARGET_RR <- 5
+THEILER   <- 1      # exclude the line of identity
+
+WIN  <- round(WIN_SEC  * FS)
+STEP <- round(STEP_SEC * FS)
+
+stopifnot(nrow(M) >= WIN)
+starts <- seq(1, nrow(M) - WIN + 1, by = STEP)
+cat(length(starts), "windows of", WIN, "samples, hop", STEP, "samples\n")
+cat("LOI would be", round(100 / WIN, 2), "% RR if not excluded\n")
+```
+
+```{r window-fn}
+# One window -> mdRQA at fixed RR. Returns an NA row on failure rather than
+# aborting the whole loop.
+win_md <- function(s) {
+  idx <- s:(s + WIN - 1)
+  W   <- M[idx, , drop = FALSE]
+
+  # Radius = quantile of this window's distance matrix.
+  # Full N x N including the zero diagonal, matching crqa's RR with tw = 0.
+  D <- as.matrix(dist(W, method = "euclidean"))
+  r <- as.numeric(quantile(D, probs = TARGET_RR / 100, names = FALSE))
+
+  # Degenerate window: more than TARGET_RR% of distances are exactly 0 (a frozen
+  # signal, or dropped frames carried forward). No radius hits the target RR.
+  if (!is.finite(r) || r <= 0) {
+    return(data.frame(start = s, radius = NA_real_, RR = NA_real_,
+                      DET = NA_real_, LAM = NA_real_, ENTR = NA_real_,
+                      flat = TRUE))
+  }
+
+  res_w <- tryCatch(
+    crqa(W, W,
+         delay = DELAY, embed = EMBED, rescale = 0, radius = r,
+         normalize = 0, mindiagline = 2, minvertline = 2, tw = THEILER,
+         whiteline = FALSE, recpt = FALSE, side = "both",
+         method = "mdcrqa", metric = "euclidean", datatype = "continuous"),
+    error = function(e) NULL
+  )
+  if (is.null(res_w)) {
+    return(data.frame(start = s, radius = r, RR = NA_real_, DET = NA_real_,
+                      LAM = NA_real_, ENTR = NA_real_, flat = FALSE))
+  }
+
+  data.frame(start = s, radius = r, RR = res_w$RR, DET = res_w$DET,
+             LAM = res_w$LAM, ENTR = res_w$ENTR, flat = FALSE)
+}
+```
+
+```{r window-run}
+win_df <- do.call(rbind, lapply(starts, win_md))
+
+# Map sample indices back to real timestamps from mdrqa_df.
+win_df <- win_df %>%
+  mutate(
+    end        = start + WIN - 1,
+    start_time = mdrqa_df$time[start],
+    end_time   = mdrqa_df$time[end],
+    mid_time   = (start_time + end_time) / 2
+  )
+
+# Sanity check: the quantile trick should land RR on target in every window.
+cat("RR range:", round(range(win_df$RR, na.rm = TRUE), 3), "\n")
+cat("Windows dropped:", sum(is.na(win_df$DET)),
+    "( flat:", sum(win_df$flat), ")\n")
+```
+
+## 10. Flag windows with elevated DET
+
+The threshold is the within-trial mean + 2 SD of the windowed DET distribution. Two
+caveats worth keeping in view:
+
+- **This is relative, not absolute.** Every trial flags *something*, because the
+  threshold is built from that trial's own mean. A flat, uneventful trial still
+  produces "peaks". If the claim is that these moments are meaningful rather than
+  merely above-average, the threshold needs a surrogate baseline — shuffle one
+  participant's window order, or pair non-interacting participants, and rebuild the
+  cutoff from that null.
+- **DET is usually left-skewed and bounded at 100.** Mean + 2 SD assumes rough
+  symmetry. Check the histogram; if it's badly skewed, the median + 2·MAD version is
+  the more honest cutoff. Both are computed — pick one and say which in the write-up.
+
+```{r threshold}
+det <- win_df$DET
+
+mu  <- mean(det, na.rm = TRUE)
+sdv <- sd(det,   na.rm = TRUE)
+thresh_sd <- mu + 2 * sdv
+
+med        <- median(det, na.rm = TRUE)
+madv       <- mad(det, na.rm = TRUE)
+thresh_mad <- med + 2 * madv
+
+hist(det, breaks = 30, main = "Windowed DET", xlab = "DET (%)")
+abline(v = thresh_sd,  col = "red",  lwd = 2)
+abline(v = thresh_mad, col = "blue", lwd = 2, lty = 2)
+legend("topleft", c("mean + 2SD", "median + 2MAD"),
+       col = c("red", "blue"), lty = c(1, 2), bty = "n")
+
+THRESH <- thresh_sd   # <- switch to thresh_mad if the histogram is skewed
+
+win_df$elevated <- !is.na(det) & det > THRESH
+cat("Threshold:", round(THRESH, 2), "% DET |",
+    sum(win_df$elevated), "of", sum(!is.na(det)), "windows flagged\n")
+```
+
+```{r det-timecourse}
+ggplot(win_df, aes(x = mid_time, y = DET)) +
+  geom_line(colour = "grey40") +
+  geom_point(data = subset(win_df, elevated), colour = "red", size = 1.2) +
+  geom_hline(yintercept = THRESH, linetype = 2, colour = "red") +
+  labs(x = "Time (s)", y = "DET (%)",
+       title = paste0("Windowed DET (", WIN_SEC, "s window, ",
+                      STEP_SEC, "s hop, RR fixed at ", TARGET_RR, "%)")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+```
+
+## 11. Merge contiguous flags into events and save
+
+Adjacent windows overlap heavily — a 5 s window with a 0.5 s hop shares 90% of its
+samples with its neighbour — so a single burst of coordination shows up as a run of
+consecutive flags. Collapse each run into one event spanning from the first sample
+of its first window to the last sample of its last window.
+
+```{r events}
+rle_flag <- rle(win_df$elevated)
+ends     <- cumsum(rle_flag$lengths)
+begins   <- ends - rle_flag$lengths + 1
+keep     <- which(rle_flag$values)
+
+events <- data.frame(
+  trial      = TRIAL,
+  event      = seq_along(keep),
+  start_time = win_df$start_time[begins[keep]],
+  end_time   = win_df$end_time[ends[keep]],
+  n_windows  = rle_flag$lengths[keep],
+  peak_DET   = sapply(keep, function(k) max(win_df$DET[begins[k]:ends[k]])),
+  mean_DET   = sapply(keep, function(k) mean(win_df$DET[begins[k]:ends[k]]))
+) %>%
+  mutate(duration = end_time - start_time)
+
+print(events)
+
+write_csv(win_df, paste0("mdrqa_windows_", TRIAL, ".csv"))   # every window
+write_csv(events, paste0("mdrqa_events_",  TRIAL, ".csv"))   # flagged episodes only
+```
+
+Note what a timestamp means here: an event's `start_time` / `end_time` bound the
+*windows* that were elevated, not a precise onset. Temporal resolution is the window
+length — a 5 s window smears any instant of high determinism across roughly ±2.5 s.
+Tighter localisation means shortening `WIN_SEC`, but not so far that each window
+holds too few recurrence points for DET to be stable.
