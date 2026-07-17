@@ -26,3 +26,5 @@ Reads the two participants' displacement CSVs for a trial and plots their time s
 Time-matches the clueGiver and guesser displacement streams on an inner join, z-scores each, and treats the dyad as a single 2-dimensional system (one stream per person, no embedding). Runs mdRQA via the `crqa` package with Euclidean distance, setting the radius per window to fix recurrence rate at 5% so that DET reflects the structure of recurrence rather than its density.
 
 The second half slides a 2s window (60 samples) across the trial at a 1s hop, recomputing DET at each step, flagging windows above mean + 2 SD (within-trial), and merging contiguous flagged windows into timestamped events. These values can be modified to change fixed RR, embedding, windows, overlap, etc. etc.
+
+*Note*: These files read in gaze data beacuse our original plan was to use mdRQA with movement and gaze. 
