@@ -1,10 +1,9 @@
 # purplecircle
-MDIG2026 Tilburg Summer School project
+MDIG2026 Tilburg Summer School project using a sub-sample of the Balance Corpus dataset (see https://github.com/WimPouw/TilburgMultiscaleSummerschool2026/tree/main/Datasets/BalanceCorpus).
 
 # Dyadic movement coordination pipeline
 
-Turns MediaPipe pose output into a per-frame movement signal for each participant, then uses multidimensional recurrence quantification analysis (mdRQA) on the dyad to locate
-moments of elevated determinism within a trial.
+Turns MediaPipe pose output into a per-frame movement signal for each participant, then uses multidimensional recurrence quantification analysis (mdRQA) on the dyad to locate moments of elevated determinism within a trial. Additional visualization with Windowed Multiscale Synchrony (WMS) plots is included in the last section.
 
 ## Pipeline
 
