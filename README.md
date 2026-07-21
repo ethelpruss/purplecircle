@@ -28,3 +28,7 @@ Time-matches the clueGiver and guesser displacement streams on an inner join, z-
 The second half slides a 2s window (60 samples) across the trial at a 1s hop, recomputing DET at each step, flagging windows above mean + 2 SD (within-trial), and merging contiguous flagged windows into timestamped events. These values can be modified to change fixed RR, embedding, windows, overlap, etc. etc.
 
 *Note*: These files read in gaze data beacuse our original plan was to use mdRQA with movement and gaze. 
+
+### `Data_exploration.Rmd` — delta scores for gaze and facial expressivity, line plots and WMS plots
+
+Data extraction and compilation over all trials is included in the beginning of the file. You need to specify the correct path for this or include that BalanceData folder in the same folder as this script (your working directory). After doing this once, the dataframe is extracted to csv and can be imported to save time (skipping the first code blocks). The code then goes through computing delta scores, initial visualization with line plots and finally, visualizationw with WMS plots.
