@@ -31,3 +31,6 @@ The second half slides a 2s window (60 samples) across the trial at a 1s hop, re
 ### `Data_exploration.Rmd` — delta scores for gaze and facial expressivity, line plots and WMS plots
 
 Data extraction and compilation over all trials is included in the beginning of the file. You need to specify the correct path for this (to the OpenFace output data that is used in this script) or include that BalanceData folder in the same folder as this script (your working directory). After doing this once, the dataframe is extracted to csv and can be imported to save time (skipping the first code blocks). The code then goes through computing delta scores, initial visualization with line plots and finally, visualization with WMS plots.
+
+---
+See the presentation slides for an overview of the research plan, plot outputs, references, and authors.
