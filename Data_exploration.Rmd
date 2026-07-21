@@ -13,7 +13,11 @@ library(dplyr)
 library(ggplot2)
 ```
 
-## Import OpenFace data (cam01 only) and aggregate into df
+# Compiling BalanceCorpus data
+
+## Import OpenFace data (cam01 only) and aggregate into df 
+
+Compiles data over all available BalanceCorpus trials/dyads
 
 ```{r import-openface}
 base_dir <- "BalanceCorpus/OpenFace/OF_output"
@@ -65,7 +69,11 @@ table(df$dyad, df$role)
 write.csv(df,"OF_df.csv")
 ```
 
-----
+################ Start from here if you already have the OF_df.csv ######
+
+# Calculating delta gaze and expressivity scores
+
+This uses the pre-extracted OpenFace data (facial action units and gaze angle).
 
 ## Load df
 
@@ -73,7 +81,9 @@ write.csv(df,"OF_df.csv")
 df <- read.csv("OF_df.csv")
 ```
 
-## Get deltas
+## Calculate delta scores
+
+### Gaze, brow and squint deltas
 
 ```{r gaze-angle-deltas}
 # delta = change from previous frame, within each recording (dyad + session_datetime + role)
@@ -93,7 +103,7 @@ df <- df %>%
   ungroup()
 ```
 
-## Expressivity delta (mean of all AU_r deltas)
+### Expressivity delta (mean of all AU_r deltas)
 
 ```{r expressivity-delta}
 # every AU intensity column (AU01_r, AU02_r, ... AU45_r)
@@ -111,23 +121,7 @@ df <- df %>%
   ungroup()
 ```
 
-## Split by condition and export (gaze angle + delta only, pre-smoothing)
-
-```{r export-by-condition}
-gaze_cols <- c("dyad", "session_datetime", "word", "condition", "role", "cam", "frame", "timestamp",
-               "gaze_angle_x", "gaze_angle_y", "delta_gaze_angle_x", "delta_gaze_angle_y")
-
-df_board  <- df %>% filter(condition == "board")  %>% select(all_of(gaze_cols))
-df_ground <- df %>% filter(condition == "ground") %>% select(all_of(gaze_cols))
-
-write.csv(df_board,  "gaze_angle_board.csv",  row.names = FALSE)
-write.csv(df_ground, "gaze_angle_ground.csv", row.names = FALSE)
-```
-
-```{r}
-write.csv(df,"OF_df.csv")
-```
-
+# Preliminary visualization
 
 ## Smooth deltas before downsampling
 
@@ -163,7 +157,9 @@ df_binned <- df %>%
   )
 ```
 
-## Plot deltas: guesser vs. clueGiver, one plot per dyad + word
+## Line plots per dyad and word
+
+### Plot deltas: guesser vs. clueGiver, one plot per dyad + word
 
 ```{r plot-delta-per-word}
 plot_delta <- function(data, dyad_val, word_val, metric, ylab) {
@@ -191,17 +187,67 @@ for (i in seq_len(nrow(combos))) {
 }
 ```
 
-### WMS analysis
+
+### Plot multi-trial timeseries (smoothed, clueGiver vs guesser)
+
+```{r plot-pair-timeseries}
+trial_dyad      <- "103_203"
+n_trials        <- 5
+trial_condition <- "board"  # "board", "ground", or NULL for either
+
+pair_x <- get_aligned_pair_n_trials(df, trial_dyad, "delta_gaze_angle_x", n_trials = n_trials, condition_val = trial_condition)
+pair_y <- get_aligned_pair_n_trials(df, trial_dyad, "delta_gaze_angle_y", n_trials = n_trials, condition_val = trial_condition)
+
+# pair$clueGiver/guesser are plain vectors (no frame/time column), so build a
+# time axis from sample index and srate; smooth_ma() reused from the earlier
+# smoothing chunk (k = frames of moving-average window, default 15 ~ 0.5s)
+plot_pair_timeseries <- function(pair, srate, k = 15, ylab = "delta", title_str = "") {
+  cg_smooth <- smooth_ma(pair$clueGiver, k = k)
+  gs_smooth <- smooth_ma(pair$guesser, k = k)
+  n <- length(pair$clueGiver)
+  time_s <- (seq_len(n) - 1) / srate
+
+  plot_df <- data.frame(
+    time  = rep(time_s, 2),
+    value = c(cg_smooth, gs_smooth),
+    role  = rep(c("clueGiver", "guesser"), each = n)
+  )
+
+  # downsample to ~10 samples/sec: bin into 0.1s windows and average within each
+  plot_df <- plot_df %>%
+    mutate(time_bin = floor(time * 10) / 10) %>%
+    group_by(role, time_bin) %>%
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    rename(time = time_bin)
+
+  ggplot(plot_df, aes(x = time, y = value, color = role)) +
+    geom_line() +
+    labs(x = "Time (s)", y = ylab, title = title_str) +
+    theme_classic() +
+    theme(panel.grid = element_blank(), plot.background = element_rect(fill = "white", color = NA))
+}
+
+trials_label <- paste(pair_x$trials, collapse = ", ")
+
+plot_pair_timeseries(pair_x, srate, ylab = "Δ gaze_angle_x (smoothed)",
+                      title_str = paste0("On board - unaffiliated, Δ gaze angle x, trials n: (", n_trials, ")"))
+plot_pair_timeseries(pair_y, srate, ylab = "Δ gaze_angle_y (smoothed)",
+                      title_str = paste0("On board - unaffiliated, Δ gaze angle y, trials n: (", n_trials, ")"))
+```
+
+# WMS analysis and plots
 
 ```{r}
 library(ggplot2)
 library(patchwork)
 library(wms)
 library(remotes)
+set.seed(55)
 ```
 
 
-## Parameter description -  this is not code, it is text in markdown. Do not change.
+## Parameter description for reference 
+(This is copied from Travis's slides for reference, the actual parameters used here are defined in the code)
   x, y,                      # two numeric vectors of equal length
   srate          = 100,      # sampling rate (Hz)
   win            = 200,      # window size (samples); >= 100 recommended
@@ -212,6 +258,10 @@ library(remotes)
   nfreqs         = 40,       # number of frequency bins
   wavelet_length = 4         # wavelet duration (seconds)
 
+
+## Compiling data in pairs for WMS plots
+
+Note that there is a single trial and multi-trial version. WMS plotting seems more informative over multipel trials, one trial might be too short for cyclical patterns to emerge.
 
 ```{r wms-setup}
 # native frame rate (frames/sec) from OpenFace's per-frame `timestamp` column
@@ -231,7 +281,49 @@ get_aligned_pair <- function(data, dyad_val, word_val, metric) {
   n  <- min(length(cg), length(gs))
   list(clueGiver = cg[seq_len(n)], guesser = gs[seq_len(n)])
 }
+
+# multi-trial version: same idea, but concatenates the first `n_trials` trials
+# (words) for a dyad instead of just one. Trials are picked in chronological
+# order via `session_datetime` (the trial's real-world start time -- not the
+# per-frame `timestamp`, which resets to 0 at the start of every trial and so
+# can't be used to order trials against each other). Each trial is aligned and
+# trimmed to equal cg/gs length independently (so clueGiver and guesser start
+# together within every trial), *then* concatenated in time order -- since
+# every trial contributes an equal-length chunk to both series, the final
+# concatenated clueGiver/guesser series are guaranteed equal length overall.
+# Which words ended up in the trial set is reported rather than chosen by hand.
+# condition_val: "board", "ground", or NULL to allow either
+get_aligned_pair_n_trials <- function(data, dyad_val, metric, n_trials = 2, condition_val = NULL) {
+  trial_pool <- data %>% filter(dyad == dyad_val)
+  if (!is.null(condition_val)) trial_pool <- filter(trial_pool, condition == condition_val)
+
+  trial_words <- trial_pool %>%
+    distinct(word, session_datetime) %>%
+    arrange(session_datetime) %>%
+    slice_head(n = n_trials) %>%
+    pull(word)
+
+  cg_chunks <- vector("list", length(trial_words))
+  gs_chunks <- vector("list", length(trial_words))
+
+  for (i in seq_along(trial_words)) {
+    pair <- get_aligned_pair(data, dyad_val, trial_words[i], metric)
+    cg_chunks[[i]] <- pair$clueGiver
+    gs_chunks[[i]] <- pair$guesser
+  }
+
+  cat("dyad:", dyad_val, "-", length(trial_words), "trial(s) used (chronological order):",
+      paste(trial_words, collapse = ", "), "\n")
+
+  list(
+    clueGiver = unlist(cg_chunks, use.names = FALSE),
+    guesser   = unlist(gs_chunks, use.names = FALSE),
+    trials    = trial_words
+  )
+}
 ```
+
+## Checking data alignment
 
 ```{r wms-sanity-check}
 # checks that the trial resolves to exactly one dyad/word/condition, that
@@ -261,6 +353,10 @@ sanity_check_pair <- function(data, dyad_val, word_val) {
 }
 ```
 
+## WMS analysis - single trial
+
+Note that here you can change the WMS parameters. 
+
 ```{r wms-run}
 # single trial: one word, one dyad
 trial_dyad <- "103_203"
@@ -270,25 +366,154 @@ trial_word <- "pasta_ground"
 
 sanity_check_pair(df, trial_dyad, trial_word)
 
-pair_x <- get_aligned_pair(df, trial_dyad, trial_word, "delta_expressivity")
-pair_y <- get_aligned_pair(df, trial_dyad, trial_word, "delta_expressivity")
+pair_x <- get_aligned_pair(df, trial_dyad, trial_word, "delta_gaze_angle_x")
+pair_y <- get_aligned_pair(df, trial_dyad, trial_word, "delta_gaze_angle_y")
 
 wms_x <- win_ms_synch(pair_x$clueGiver, pair_x$guesser,
-                       srate = srate, win = 30, minfreq = 0.3, maxfreq = 8,
-                       mincycle = 4, maxcycle = 8, nfreqs = 32, wavelet_length = 3)
+                       srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                       mincycle = 5, maxcycle = 8, nfreqs = 32, wavelet_length = 4)
 wms_y <- win_ms_synch(pair_y$clueGiver, pair_y$guesser,
-                       srate = srate, win = 30, minfreq = 0.3, maxfreq = 8,
-                       mincycle =4, maxcycle = 8, nfreqs = 32, wavelet_length = 3)
+                       srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                       mincycle = 5, maxcycle = 8, nfreqs = 32, wavelet_length = 4)
 ```
+
+## WMS plots - single trial
 
 ```{r wms-plot}
-plot_wms(wms_x, title_str = paste(trial_dyad, trial_word, "- x"))
-plot_wms(wms_y, title_str = paste(trial_dyad, trial_word, "- y"))
+plot_wms(wms_x, title_str = paste(trial_dyad, trial_word, "gaze x"),show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.35,
+         arrow_min_si = 0.4)
+plot_wms(wms_y, title_str = paste(trial_dyad, trial_word, "gaze y"),show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.35,
+         arrow_min_si = 0.4)
+```
+
+## WMS analysis - multi-trial
+
+Note that here you can change the WMS parameters. 
+
+
+```{r wms-run-multi-trial}
+# multiple trials, one dyad: concatenates the first n_trials words
+# chronologically for trial_dyad (see get_aligned_pair_n_trials in wms-setup)
+trial_dyad      <- "103_203"
+n_trials        <- 5
+trial_condition <- "board"  # "board", "ground", or NULL for either
+
+pair_x <- get_aligned_pair_n_trials(df, trial_dyad, "delta_gaze_angle_x", n_trials = n_trials, condition_val = trial_condition)
+pair_y <- get_aligned_pair_n_trials(df, trial_dyad, "delta_gaze_angle_y", n_trials = n_trials, condition_val = trial_condition)
+
+nfreqs <- floor((log2(length(pair_x$clueGiver)) - 1) * 12)
+
+
+wms_x_multi <- win_ms_synch(pair_x$clueGiver, pair_x$guesser,
+                             srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                             mincycle =5, maxcycle = 8, nfreqs = nfreqs, wavelet_length = 4)
+wms_y_multi <- win_ms_synch(pair_y$clueGiver, pair_y$guesser,
+                             srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                             mincycle = 5, maxcycle = 8, nfreqs = nfreqs, wavelet_length = 4)
+```
+
+## WMS plots - multi-trial
+
+```{r wms-plot-multi-trial}
+trials_label <- paste(pair_x$trials, collapse = ", ")
+
+plot_wms(wms_x_multi, title_str = paste0("On board - unaffiliated", " Δ gaze angle x trials n: (", n_trials, ")"),
+         show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.5,
+         arrow_min_si = 0.4)
+plot_wms(wms_y_multi, title_str = paste0("On board - unaffiliated", " Δ gaze angle y trials n: (", n_trials, ")"),
+         show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.5,
+         arrow_min_si = 0.4)
 ```
 
 
-Brow- action unit 4 - unstable or tense - 
-Squinting - action unit 7 - 
-expressiveness score - face movement total score - expressivity (by action unit deltas and then)
+# Creating matching WMS plots for mdRQA plots
+
+## Unaffiliated couple, body movement WMS plots
+
+```{r tkara data}
+guesser <- read.csv("103_203_20_1_20250113_152735_bitter_board_guesser_cam01_body_displacement.csv")
+clueGiver <- read.csv("103_203_20_1_20250113_152735_bitter_board_clueGiver_cam01_body_displacement.csv")
+```
+
+```{r}
+nfreqs <- floor((log2(607) - 1) * 12)
+
+
+wms_body <- win_ms_synch(guesser$displacement_smooth[1:607], clueGiver$displacement_smooth[1:607],
+                       srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                       mincycle = 5, maxcycle = 8, nfreqs = nfreqs, wavelet_length = 4 )
+
+
+plot_wms(wms_body, title_str = "body displacement - bitter board,103-203",
+        show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.35,
+         arrow_min_si = 0.4)
+
+```
+
+## Affiliated couple, body movement WMS plots
+
+
+```{r tkara data}
+guesser <- read.csv("116_216_45_1_20250116_103813_gravy_board_guesser_cam01_body_displacement.csv")
+clueGiver <- read.csv("116_216_45_1_20250116_103813_gravy_board_clueGiver_cam01_body_displacement.csv")
+```
+
+```{r}
+nfreqs <- floor((log2(607) - 1) * 12)
+
+
+wms_body <- win_ms_synch(guesser$displacement_smooth[1:607], clueGiver$displacement_smooth[1:607],
+                       srate = srate, win = 30, minfreq = 0.25, maxfreq = 10,
+                       mincycle = 5, maxcycle = 8, nfreqs = nfreqs, wavelet_length = )
+
+
+plot_wms(wms_body, title_str = "body displacement - bitter board,103-203",
+        show_arrows  = TRUE,
+         arrow_n_time = 20,
+         arrow_n_freq = 6,
+         arrow_scale  = 0.35,
+         arrow_min_si = 0.4)
+
+```
+
+```{r}
+# Mean SI within a frequency band
+band  <- which(wms_body$freqs2use >= 0.25 & wms_body$freqs2use <= 5)
+
+# Time course at a specific frequency
+hz05_idx <- which.min(abs(wms_body$freqs2use - 5))
+si_tc    <- wms_body$synch[hz05_idx, ]
+
+# Peak synchrony location
+pk <- which(wms_body$synch == max(wms_body$synch), arr.ind = TRUE)
+```
+
+```{r}
+data.frame(
+  Extraction = c("Band (0.25–5 Hz)", "Frequency (~5 Hz)", "Peak"),
+  Metric     = c("Mean SI", "SD of SI over time at (~5 Hz)", "Peak SI"),
+  Value      = c(round(mean(wms_body$synch[band, ]), 3),
+                 round(sd(si_tc), 3),
+                 round(max(wms_body$synch), 3)),
+  Location   = c("—", "—",
+                 paste0(round(wms_body$freqs2use[pk[1]], 2), " Hz @ ",
+                        round(wms_body$time_synch[pk[2]], 1), " s"))
+) |> knitr::kable(align = "llrl")
+```
 
 
