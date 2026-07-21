@@ -3,7 +3,7 @@ MDIG2026 Tilburg Summer School project using a sub-sample of the Balance Corpus 
 
 # Dyadic movement coordination pipeline
 
-Turns MediaPipe pose output into a per-frame movement signal for each participant, then uses multidimensional recurrence quantification analysis (mdRQA) on the dyad to locate moments of elevated determinism within a trial. Additional visualization with Windowed Multiscale Synchrony (WMS) plots is included in the last section.
+Turns MediaPipe pose output into a per-frame movement signal for each participant, then uses multidimensional recurrence quantification analysis (mdRQA) on the dyad to locate moments of elevated determinism within a trial. Additional visualization with Windowed Multiscale Synchrony (WMS) plots is included in the last section -- this also uses additional output data from OpenFace.
 
 ## Pipeline
 
@@ -30,4 +30,4 @@ The second half slides a 2s window (60 samples) across the trial at a 1s hop, re
 
 ### `Data_exploration.Rmd` — delta scores for gaze and facial expressivity, line plots and WMS plots
 
-Data extraction and compilation over all trials is included in the beginning of the file. You need to specify the correct path for this or include that BalanceData folder in the same folder as this script (your working directory). After doing this once, the dataframe is extracted to csv and can be imported to save time (skipping the first code blocks). The code then goes through computing delta scores, initial visualization with line plots and finally, visualization with WMS plots.
+Data extraction and compilation over all trials is included in the beginning of the file. You need to specify the correct path for this (to the OpenFace output data that is used in this script) or include that BalanceData folder in the same folder as this script (your working directory). After doing this once, the dataframe is extracted to csv and can be imported to save time (skipping the first code blocks). The code then goes through computing delta scores, initial visualization with line plots and finally, visualization with WMS plots.
